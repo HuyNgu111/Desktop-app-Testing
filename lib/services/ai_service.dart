@@ -1,65 +1,75 @@
 import 'dart:convert';
-import 'dart:developer' as developer;
-import 'package:google_generative_ai/google_generative_ai.dart';
+import 'dart:io';
+import 'api_key.dart';
 
 class AiService {
-  // BẠN HÃY DÁN API KEY CỦA BẠN VÀO ĐÂY (API Key đang dùng ở Free Tier)
-  static const String apiKey = 'AIzaSyDBeRLoXhhg9xNoqq-PrkMAomoGxbE1q-c'; 
+  // Lấy key DeepSeek từ file đã giấu
+  static const String apiKey = deepseekApiKey;
 
-  Future<Map<String, dynamic>?> analyzeTestCases(String rawText) async {
+  Future<String> reviewSystemTestWithSRS({
+    required String srsContent,
+    required String excelSummary,
+  }) async {
     try {
-      // Sử dụng model 1.5 flash vì nó cực kỳ nhanh, rẻ và ổn định
-      final model = GenerativeModel(
-        model: 'gemini-1.5-flash',
-        apiKey: apiKey,
-      );
-
-      // Đây chính là Prompt "Thần chú" ép AI đọc mọi loại file Excel
-      final prompt = '''
-Bạn là một Chuyên gia Đảm bảo Chất lượng Phần mềm (QA/Tester).
-Dưới đây là dữ liệu thô (được phân tách bằng dấu |) trích xuất từ một file Excel chứa kịch bản kiểm thử (Test Case). File này có thể là Unit Test, UAT, hoặc Functional Test với cấu trúc cột lộn xộn.
-
-NHIỆM VỤ CỦA BẠN:
-1. Tự động nhận diện dòng nào là Tiêu đề cột (Header), dòng nào là Dữ liệu Test Case.
-2. Trích xuất các thông tin cốt lõi sau cho mỗi Test Case (nếu không có thì để trống): 
-   - Mã Test Case (ID)
-   - Tên tính năng / Mô tả Test Case (Name)
-   - Kết quả (Result: thường là Pass, Fail, OK, NG...)
-3. Bỏ qua các dòng rác, metadata, lịch sử cập nhật (Histories) không liên quan.
-4. Tổng hợp nhận xét (Feedback) về chất lượng của bộ Test Case này (ví dụ: mô tả có chi tiết không, test có bao phủ đủ các trường hợp không).
-
-KẾT QUẢ TRẢ VỀ: BẮT BUỘC trả về duy nhất một chuỗi JSON hợp lệ với cấu trúc sau, không kèm bất kỳ giải thích hay định dạng markdown (```json) nào khác:
-{
-  "feedback": "Nhận xét tổng quan của bạn ở đây...",
-  "test_cases": [
-    { "id": "1.1.1", "name": "Login with valid Manager...", "result": "PASSED" }
-  ]
-}
-
-DỮ LIỆU THÔ CẦN PHÂN TÍCH:
-$rawText
-''';
-
-      // Gửi yêu cầu lên Google Gemini
-      final response = await model.generateContent([Content.text(prompt)]);
-      String aiResponseText = response.text ?? '{}';
-
-      // SỬA LỖI: Dùng Biểu thức chính quy (Regex) để trích xuất đúng cái ruột JSON 
-      // Bỏ qua mọi lời chào hỏi luyên thuyên của AI
-      final RegExp jsonRegex = RegExp(r'\{[\s\S]*\}');
-      final match = jsonRegex.firstMatch(aiResponseText);
-      
-      if (match != null) {
-        aiResponseText = match.group(0)!;
+      // 1. Rút gọn file Word nếu quá dài để tối ưu tốc độ và chi phí
+      String safeSrs = srsContent;
+      if (safeSrs.length > 20000) {
+        safeSrs = safeSrs.substring(0, 20000) + '\n\n...[Đã cắt bớt phần sau của tài liệu SRS]...';
       }
 
-      // Ép kiểu chuỗi Text thành dạng JSON/Map
-      Map<String, dynamic> finalData = jsonDecode(aiResponseText);
-      return finalData;
+      const systemPrompt = 'Bạn là Giảng viên / Chuyên gia QA chấm đồ án Capstone Project.';
+      final userPrompt = '''
+Dưới đây là 2 tài liệu của nhóm sinh viên:
 
+TÀI LIỆU 1: TỔNG QUAN YÊU CẦU DỰ ÁN (Trích từ file SRS/Word):
+$safeSrs
+
+TÀI LIỆU 2: KẾT QUẢ THỰC HIỆN SYSTEM TEST (Trích từ file Excel):
+$excelSummary
+
+NHIỆM VỤ CỦA BẠN:
+1. Đánh giá độ bao phủ (Coverage): Các Module trong System Test đã kiểm thử hết các tính năng cốt lõi được mô tả trong tài liệu dự án chưa?
+2. Đánh giá chất lượng kiểm thử: Nhận xét về số lượng test case và tỷ lệ Pass/Fail qua các vòng test.
+3. Đề xuất cải thiện: Nhóm sinh viên cần lưu ý bổ sung thêm kịch bản kiểm thử nào (Security, Performance, Edge Cases...) trước khi bảo vệ đồ án?
+
+YÊU CẦU ĐỊNH DẠNG:
+- Trả về dạng văn bản nhận xét chuyên nghiệp, chia đề mục rõ ràng bằng Markdown.
+- Cho điểm số dự kiến (thang điểm 10) ở cuối bài.
+''';
+
+      // 2. Cấu hình gọi API DeepSeek
+      final url = Uri.parse('https://api.deepseek.com/chat/completions');
+      final httpClient = HttpClient();
+      final request = await httpClient.postUrl(url);
+
+      request.headers.set('Content-Type', 'application/json; charset=utf-8');
+      request.headers.set('Authorization', 'Bearer $apiKey');
+
+      final payload = {
+        'model': 'deepseek-chat', // Bản DeepSeek-V3 cực nhanh và ổn định
+        'messages': [
+          {'role': 'system', 'content': systemPrompt},
+          {'role': 'user', 'content': userPrompt},
+        ],
+        'temperature': 0.7,
+        'stream': false,
+      };
+
+      request.add(utf8.encode(jsonEncode(payload)));
+      final response = await request.close();
+
+      // 3. Đọc dữ liệu trả về
+      final responseBody = await response.transform(utf8.decoder).join();
+      final jsonResponse = jsonDecode(responseBody);
+
+      if (response.statusCode == 200) {
+        return jsonResponse['choices'][0]['message']['content'] ?? 'Không có phản hồi từ DeepSeek.';
+      } else {
+        return 'Lỗi từ DeepSeek API (Mã ${response.statusCode}):\n${jsonResponse['error']?['message'] ?? responseBody}';
+      }
     } catch (e) {
-      developer.log('Lỗi khi gọi AI: $e', name: 'AiService');
-      return null; // Trả về null nếu AI bị lỗi
+      print('Lỗi gọi DeepSeek: $e');
+      return 'Lỗi chi tiết khi kết nối DeepSeek: $e';
     }
   }
 }
