@@ -168,24 +168,30 @@ class _ImportScreenState extends State<ImportScreen> {
                 // 3. Đọc file Word
                 final wordText = await WordService().extractText(wordPath!);
 
-                // 4. Gửi tóm tắt cho AI phân tích
-                final aiFeedback = await AiService().reviewSystemTestWithSRS(
-                  srsContent: wordText.isNotEmpty
-                      ? wordText
-                      : 'Không có thông tin Word',
+                print("Đang gửi cho AI...");
+                AiReviewResult? aiResult = await AiService().reviewSystemTestWithSRS(
+                  srsContent: wordText.isNotEmpty ? wordText : 'Không có thông tin Word',
                   excelSummary: reportData.toAiPromptSummary(),
                 );
 
-                // 5. Chuyển sang màn hình Report
+                if (aiResult == null) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Lỗi: AI không thể phân tích file này!'), backgroundColor: Colors.red),
+                    );
+                  }
+                  return;
+                }
+
+                // 4. Chuyển sang màn hình Report
                 if (context.mounted) {
-                  if (!mounted) return;
                   Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (context) => ReportScreen(
                         groupName: groupName,
                         reportData: reportData,
-                        aiFeedback: aiFeedback,
+                        aiResult: aiResult, // CHUYỀN TOÀN BỘ KẾT QUẢ AI SANG
                       ),
                     ),
                   );

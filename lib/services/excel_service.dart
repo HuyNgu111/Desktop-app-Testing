@@ -6,23 +6,21 @@ class SystemTestCase {
   final String description;
   final String procedure;
   final String expectedResult;
-  final String result; // Passed / Failed
+  final String r1Result;
+  final String r2Result;
+  final String round3Result;
+  final String result;
 
   SystemTestCase({
     required this.id,
     required this.description,
     required this.procedure,
     required this.expectedResult,
+    required this.r1Result,
+    required this.r2Result,
+    required this.round3Result,
     required this.result,
   });
-
-  Map<String, dynamic> toMap() => {
-        'id': id,
-        'description': description,
-        'procedure': procedure,
-        'expected': expectedResult,
-        'result': result,
-      };
 }
 
 class ModuleSummary {
@@ -30,6 +28,14 @@ class ModuleSummary {
   final String featureName;
   final String requirement;
   final int totalTCs;
+
+  final int r1Passed;
+  final int r1Failed;
+  final int r2Passed;
+  final int r2Failed;
+  final int r3Passed;
+  final int r3Failed;
+
   final int passedCount;
   final int failedCount;
   final List<SystemTestCase> testCases;
@@ -39,17 +45,28 @@ class ModuleSummary {
     required this.featureName,
     required this.requirement,
     required this.totalTCs,
+    required this.r1Passed,
+    required this.r1Failed,
+    required this.r2Passed,
+    required this.r2Failed,
+    required this.r3Passed,
+    required this.r3Failed,
     required this.passedCount,
     required this.failedCount,
     required this.testCases,
   });
-
-  double get passRate => totalTCs > 0 ? (passedCount / totalTCs) * 100 : 0.0;
 }
 
 class SystemTestReportData {
   final int totalModules;
   final int grandTotalTCs;
+  final int grandR1Passed;
+  final int grandR1Failed;
+  final int grandR2Passed;
+  final int grandR2Failed;
+  final int grandR3Passed;
+  final int grandR3Failed;
+
   final int totalPassed;
   final int totalFailed;
   final List<ModuleSummary> modules;
@@ -57,34 +74,35 @@ class SystemTestReportData {
   SystemTestReportData({
     required this.totalModules,
     required this.grandTotalTCs,
+    required this.grandR1Passed,
+    required this.grandR1Failed,
+    required this.grandR2Passed,
+    required this.grandR2Failed,
+    required this.grandR3Passed,
+    required this.grandR3Failed,
     required this.totalPassed,
     required this.totalFailed,
     required this.modules,
   });
 
-  double get overallPassRate =>
-      grandTotalTCs > 0 ? (totalPassed / grandTotalTCs) * 100 : 0.0;
-
-  /// Tạo chuỗi tóm tắt sạch, tối ưu hóa token để gửi cho Gemini AI
   String toAiPromptSummary() {
     StringBuffer sb = StringBuffer();
-    sb.writeln('=== TỔNG HỢP SYSTEM TEST CỦA DỰ ÁN ===');
-    sb.writeln('Tổng số Module kiểm thử: $totalModules');
-    sb.writeln('Tổng số Test Cases: $grandTotalTCs');
-    sb.writeln('Passed: $totalPassed | Failed: $totalFailed | Tỷ lệ Pass: ${overallPassRate.toStringAsFixed(1)}%\n');
+    sb.writeln('=== BẢNG TỔNG HỢP SỐ LIỆU SYSTEM TEST TOÀN DỰ ÁN ===');
+    sb.writeln('Quy mô: $totalModules Modules | $grandTotalTCs Test Cases');
+    sb.writeln('Tiến trình: R1 ($grandR1Passed P / $grandR1Failed F) -> R2 ($grandR2Passed P / $grandR2Failed F) -> R3 ($grandR3Passed P / $grandR3Failed F)\n');
 
+    sb.writeln('=== DANH SÁCH CHI TIẾT KỊCH BẢN KIỂM THỬ (TEST CASES) ===');
     for (var mod in modules) {
-      sb.writeln('--- Module: ${mod.featureName} (${mod.sheetName}) ---');
-      sb.writeln('Yêu cầu kiểm thử: ${mod.requirement}');
-      sb.writeln('Số lượng TC: ${mod.totalTCs} (Passed: ${mod.passedCount}, Failed: ${mod.failedCount})');
+      sb.writeln('--- Module: ${mod.featureName} [Sheet: ${mod.sheetName}] ---');
+      if (mod.requirement.isNotEmpty) {
+        sb.writeln('Yêu cầu kiểm thử: ${mod.requirement}');
+      }
+      sb.writeln('Danh sách Kịch bản:');
       
-      // Liệt kê các ca failed để AI chú ý review
-      var failedTCs = mod.testCases.where((tc) => tc.result.toLowerCase().contains('fail')).toList();
-      if (failedTCs.isNotEmpty) {
-        sb.writeln('Các ca FAIL cần lưu ý:');
-        for (var ftc in failedTCs) {
-          sb.writeln('  - [${ftc.id}] ${ftc.description} -> Mong đợi: ${ftc.expectedResult}');
-        }
+      for (var tc in mod.testCases) {
+        String proc = tc.procedure.isNotEmpty ? ' | Các bước: ${tc.procedure.replaceAll('\n', ' ')}' : '';
+        String exp = tc.expectedResult.isNotEmpty ? ' | Kỳ vọng: ${tc.expectedResult.replaceAll('\n', ' ')}' : '';
+        sb.writeln('  * [${tc.id}] ${tc.description}$proc$exp | Lịch sử Test: R1[${tc.r1Result}] -> R2[${tc.r2Result}] -> R3[${tc.round3Result}]');
       }
       sb.writeln();
     }
@@ -99,139 +117,153 @@ class ExcelService {
       var excel = Excel.decodeBytes(bytes);
 
       List<ModuleSummary> modules = [];
+      final Set<String> seenSheets = {};
+
       int grandTotal = 0;
-      int grandPassed = 0;
-      int grandFailed = 0;
+      int gR1P = 0, gR1F = 0, gR2P = 0, gR2F = 0, gR3P = 0, gR3F = 0;
 
       for (var sheetName in excel.tables.keys) {
+        String cleanSheetKey = sheetName.trim().toLowerCase();
+        if (seenSheets.contains(cleanSheetKey)) continue;
+
         var table = excel.tables[sheetName];
         if (table == null || table.rows.isEmpty) continue;
 
-        // 1. Tìm vị trí dòng Tiêu đề (Header row chứa 'Test Case ID')
+        String featureName = sheetName;
+        String requirement = '';
+
         int headerRowIndex = -1;
         int idCol = -1, descCol = -1, procCol = -1, expCol = -1;
         int r1Col = -1, r2Col = -1, r3Col = -1;
 
-        for (int r = 0; r < table.rows.length; r++) {
+        // 1. Quét tìm Feature, Requirement & Dòng Header (BỎ QUA LUÔN CÁC Ô TỔNG HỢP PASS/FAIL BẰNG CÔNG THỨC)
+        int scanLimit = table.rows.length < 20 ? table.rows.length : 20;
+        for (int r = 0; r < scanLimit; r++) {
           var row = table.rows[r];
+          if (row.isEmpty) continue;
+
           for (int c = 0; c < row.length; c++) {
-            String val = row[c]?.value?.toString().trim().toLowerCase() ?? '';
-            if (val == 'test case id') {
-              headerRowIndex = r;
-              break;
-            }
-          }
-          if (headerRowIndex != -1) break;
-        }
+            String cellText = row[c]?.value?.toString().trim().toLowerCase() ?? '';
+            cellText = cellText.replaceAll(RegExp(r'\s+'), ' ');
 
-        // Nếu sheet này không có bảng Test Case thì bỏ qua (VD: sheet Cover, Note...)
-        if (headerRowIndex == -1) continue;
-
-        // 2. Xác định vị trí các cột
-        var headerRow = table.rows[headerRowIndex];
-        for (int c = 0; c < headerRow.length; c++) {
-          String val = headerRow[c]?.value?.toString().trim().toLowerCase() ?? '';
-          if (val.contains('test case id')) idCol = c;
-          if (val.contains('description')) descCol = c;
-          if (val.contains('procedure')) procCol = c;
-          if (val.contains('expected')) expCol = c;
-          if (val == 'round 1') r1Col = c;
-          if (val == 'round 2') r2Col = c;
-          if (val == 'round 3') r3Col = c;
-        }
-
-        // 3. Đọc Metadata phần trên (Feature Name, Requirement)
-        String featureName = sheetName;
-        String requirement = '';
-        for (int r = 0; r < headerRowIndex; r++) {
-          var row = table.rows[r];
-          for (int c = 0; c < row.length; c++) {
-            String val = row[c]?.value?.toString().trim().toLowerCase() ?? '';
-            if (val == 'feature' && c + 1 < row.length) {
+            if (cellText.contains('feature') && c + 1 < row.length) {
               featureName = row[c + 1]?.value?.toString().trim() ?? featureName;
-            }
-            if (val == 'test requirement' && c + 1 < row.length) {
+            } else if (cellText.contains('test requirement') && c + 1 < row.length) {
               requirement = row[c + 1]?.value?.toString().trim() ?? '';
+            } else if (cellText.contains('test case id')) {
+              headerRowIndex = r;
             }
           }
         }
 
-        // 4. Lặp qua các dòng dữ liệu để bóc tách Test Cases
-        List<SystemTestCase> testCases = [];
-        int passed = 0;
-        int failed = 0;
-
-        for (int r = headerRowIndex + 1; r < table.rows.length; r++) {
-          var row = table.rows[r];
-          if (row.isEmpty || idCol >= row.length || row[idCol] == null) continue;
-
-          String tcId = row[idCol]?.value?.toString().trim() ?? '';
-          // Chỉ lấy dòng có mã bắt đầu bằng TC (bỏ qua các dòng phân nhóm như 'Member Management')
-          if (!tcId.toUpperCase().startsWith('TC')) continue;
-
-          String desc = (descCol != -1 && descCol < row.length)
-              ? row[descCol]?.value?.toString().trim() ?? ''
-              : '';
-          String proc = (procCol != -1 && procCol < row.length)
-              ? row[procCol]?.value?.toString().trim() ?? ''
-              : '';
-          String exp = (expCol != -1 && expCol < row.length)
-              ? row[expCol]?.value?.toString().trim() ?? ''
-              : '';
-
-          // Lấy kết quả từ Round 3 -> Round 2 -> Round 1
-          String res = '';
-          if (r3Col != -1 && r3Col < row.length && row[r3Col]?.value != null) {
-            res = row[r3Col]!.value.toString().trim();
+        // 2. Xác định các cột chi tiết
+        if (headerRowIndex != -1) {
+          var headerRow = table.rows[headerRowIndex];
+          for (int c = 0; c < headerRow.length; c++) {
+            String val = headerRow[c]?.value?.toString().trim().toLowerCase() ?? '';
+            val = val.replaceAll(RegExp(r'\s+'), ' ');
+            if (val.contains('test case id')) idCol = c;
+            if (val.contains('description')) descCol = c;
+            if (val.contains('procedure')) procCol = c;
+            if (val.contains('expected')) expCol = c;
+            if (val.contains('round 1')) r1Col = c;
+            if (val.contains('round 2')) r2Col = c;
+            if (val.contains('round 3')) r3Col = c;
           }
-          if (res.isEmpty && r2Col != -1 && r2Col < row.length && row[r2Col]?.value != null) {
-            res = row[r2Col]!.value.toString().trim();
-          }
-          if (res.isEmpty && r1Col != -1 && r1Col < row.length && row[r1Col]?.value != null) {
-            res = row[r1Col]!.value.toString().trim();
-          }
-
-          if (res.toLowerCase() == 'passed') {
-            passed++;
-          } else if (res.toLowerCase() == 'failed') {
-            failed++;
-          }
-
-          testCases.add(SystemTestCase(
-            id: tcId,
-            description: desc,
-            procedure: proc,
-            expectedResult: exp,
-            result: res.isNotEmpty ? res : 'Pending',
-          ));
         }
 
-        if (testCases.isNotEmpty) {
-          modules.add(ModuleSummary(
-            sheetName: sheetName,
-            featureName: featureName,
-            requirement: requirement,
-            totalTCs: testCases.length,
-            passedCount: passed,
-            failedCount: failed,
-            testCases: testCases,
-          ));
+        List<SystemTestCase> allTestCases = [];
+        
+        // CÁC BIẾN ĐẾM THỦ CÔNG ĐẢM BẢO CHUẨN 100%
+        int r1P = 0, r1F = 0;
+        int r2P = 0, r2F = 0;
+        int r3P = 0, r3F = 0;
 
-          grandTotal += testCases.length;
-          grandPassed += passed;
-          grandFailed += failed;
+        if (headerRowIndex != -1 && idCol != -1) {
+          for (int r = headerRowIndex + 1; r < table.rows.length; r++) {
+            var row = table.rows[r];
+            if (row.isEmpty || idCol >= row.length || row[idCol] == null) continue;
+
+            String tcId = row[idCol]?.value?.toString().trim() ?? '';
+            if (!tcId.toUpperCase().startsWith('TC')) continue;
+
+            String desc = (descCol != -1 && descCol < row.length) ? row[descCol]?.value?.toString().trim() ?? '' : '';
+            String proc = (procCol != -1 && procCol < row.length) ? row[procCol]?.value?.toString().trim() ?? '' : '';
+            String exp = (expCol != -1 && expCol < row.length) ? row[expCol]?.value?.toString().trim() ?? '' : '';
+
+            String r1Val = (r1Col != -1 && r1Col < row.length) ? row[r1Col]?.value?.toString().trim() ?? '' : '';
+            String r2Val = (r2Col != -1 && r2Col < row.length) ? row[r2Col]?.value?.toString().trim() ?? '' : '';
+            String r3Val = (r3Col != -1 && r3Col < row.length) ? row[r3Col]?.value?.toString().trim() ?? '' : '';
+
+            // TỰ ĐỘNG ĐẾM TRỰC TIẾP
+            if (r1Val.toLowerCase().contains('pass')) r1P++;
+            if (r1Val.toLowerCase().contains('fail')) r1F++;
+            if (r2Val.toLowerCase().contains('pass')) r2P++;
+            if (r2Val.toLowerCase().contains('fail')) r2F++;
+            if (r3Val.toLowerCase().contains('pass')) r3P++;
+            if (r3Val.toLowerCase().contains('fail')) r3F++;
+
+            String finalRes = r3Val.isNotEmpty ? r3Val : (r2Val.isNotEmpty ? r2Val : (r1Val.isNotEmpty ? r1Val : 'Pending'));
+
+            allTestCases.add(SystemTestCase(
+              id: tcId,
+              description: desc,
+              procedure: proc,
+              expectedResult: exp,
+              r1Result: r1Val,
+              r2Result: r2Val,
+              round3Result: r3Val,
+              result: finalRes,
+            ));
+          }
         }
+
+        if (allTestCases.isEmpty) continue;
+        seenSheets.add(cleanSheetKey);
+
+        // TỔNG SỐ TC CHÍNH LÀ ĐỘ DÀI CỦA MẢNG TEST CASES
+        int totalCount = allTestCases.length; 
+
+        modules.add(ModuleSummary(
+          sheetName: sheetName,
+          featureName: featureName,
+          requirement: requirement,
+          totalTCs: totalCount,
+          r1Passed: r1P,
+          r1Failed: r1F,
+          r2Passed: r2P,
+          r2Failed: r2F,
+          r3Passed: r3P,
+          r3Failed: r3F,
+          passedCount: r3P,
+          failedCount: r3F,
+          testCases: allTestCases,
+        ));
+
+        grandTotal += totalCount;
+        gR1P += r1P;
+        gR1F += r1F;
+        gR2P += r2P;
+        gR2F += r2F;
+        gR3P += r3P;
+        gR3F += r3F;
       }
 
       return SystemTestReportData(
         totalModules: modules.length,
         grandTotalTCs: grandTotal,
-        totalPassed: grandPassed,
-        totalFailed: grandFailed,
+        grandR1Passed: gR1P,
+        grandR1Failed: gR1F,
+        grandR2Passed: gR2P,
+        grandR2Failed: gR2F,
+        grandR3Passed: gR3P,
+        grandR3Failed: gR3F,
+        totalPassed: gR3P,
+        totalFailed: gR3F,
         modules: modules,
       );
     } catch (e) {
-      print('Lỗi đọc file System Test Excel: $e');
+      print('Lỗi đọc System Test Excel: $e');
       return null;
     }
   }
