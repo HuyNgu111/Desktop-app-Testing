@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-
 import 'report_screen.dart';
 import '../services/excel_service.dart';
-import '../services/word_service.dart';
 import '../services/ai_service.dart';
+import '../services/word_service.dart';
 
 class ImportScreen extends StatefulWidget {
   const ImportScreen({super.key});
@@ -18,7 +17,12 @@ class _ImportScreenState extends State<ImportScreen> {
   String? excelPath;
   final TextEditingController _groupNameController = TextEditingController();
 
+  // Biến quản lý trạng thái Loading và thông báo tiến trình
+  bool _isLoading = false;
+  String _loadingMessage = '';
+
   Future<void> _pickWordFile() async {
+    if (_isLoading) return;
     PlatformFile? file = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: ['docx'],
@@ -32,6 +36,7 @@ class _ImportScreenState extends State<ImportScreen> {
   }
 
   Future<void> _pickExcelFile() async {
+    if (_isLoading) return;
     PlatformFile? file = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: ['xlsx'],
@@ -44,6 +49,91 @@ class _ImportScreenState extends State<ImportScreen> {
     }
   }
 
+  Future<void> _handleStartReview() async {
+    String groupName = _groupNameController.text.trim();
+
+    if (wordPath == null || excelPath == null || groupName.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vui lòng chọn đủ 2 file và nhập tên nhóm!'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    // 1. Kích hoạt Loading ngay lập tức trên UI
+    setState(() {
+      _isLoading = true;
+      _loadingMessage = 'Đang đọc và bóc tách dữ liệu từ file Word & Excel...';
+    });
+
+    // Khoảng trễ 100ms giúp Flutter kịp vẽ thanh Loading lên màn hình trước khi đọc file nặng
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    try {
+      // 2. Bóc tách dữ liệu file
+      final reportData = await ExcelService().parseSystemTestExcel(excelPath!);
+      if (reportData == null || reportData.modules.isEmpty) {
+        throw Exception('Không thể đọc dữ liệu test case từ file Excel này!');
+      }
+
+      final wordText = await WordService().extractText(wordPath!);
+
+      // 3. Cập nhật thông báo sang bước AI
+      if (mounted) {
+        setState(() {
+          _loadingMessage = 'Đang gửi tài liệu và chờ DeepSeek AI phân tích...';
+        });
+      }
+
+      // 4. Gửi cho AI Review
+      final aiResult = await AiService().reviewSystemTestWithSRS(
+        srsContent: wordText.isNotEmpty ? wordText : 'Không có thông tin Word',
+        excelSummary: reportData.toAiPromptSummary(),
+      );
+
+      if (aiResult == null) {
+        throw Exception('Không nhận được phản hồi từ AI.');
+      }
+
+      // 5. Chuyển sang màn hình Report
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _loadingMessage = '';
+        });
+
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ReportScreen(
+              groupName: groupName,
+              reportData: reportData,
+              aiResult: aiResult,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      // Bắt lỗi và dừng Loading để người dùng thử lại
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _loadingMessage = '';
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Lỗi: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
   @override
   void dispose() {
     _groupNameController.dispose();
@@ -53,165 +143,135 @@ class _ImportScreenState extends State<ImportScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('CapReview - Import Data')),
+      appBar: AppBar(
+        title: const Text('CapReview - Import Data'),
+        centerTitle: true,
+      ),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-              'Vui lòng chọn tài liệu cần Review',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: _pickWordFile,
-              icon: const Icon(Icons.description, size: 28),
-              label: const Text('Chọn file SRS (Word)'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 16,
-                ),
-                textStyle: const TextStyle(fontSize: 18),
-              ),
-            ),
-            if (wordPath != null) ...[
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  'Đã chọn: $wordPath',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+        child: SingleChildScrollView(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 550),
+            padding: const EdgeInsets.all(32.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text(
+                  'Thẩm Định Chất Lượng Tài Liệu Testing',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                   textAlign: TextAlign.center,
                 ),
-              ),
-            ],
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              onPressed: _pickExcelFile,
-              icon: const Icon(Icons.table_chart, size: 28),
-              label: const Text('Chọn file Test Case (Excel)'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 16,
-                ),
-                textStyle: const TextStyle(fontSize: 18),
-              ),
-            ),
-            if (excelPath != null) ...[
-              const SizedBox(height: 8),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  'Đã chọn: $excelPath',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                const SizedBox(height: 8),
+                const Text(
+                  'Chọn tài liệu yêu cầu (Word) và báo cáo System Test (Excel)',
+                  style: TextStyle(fontSize: 14, color: Colors.grey),
                   textAlign: TextAlign.center,
                 ),
-              ),
-            ],
-            const SizedBox(height: 32),
-            SizedBox(
-              width: 300,
-              child: TextField(
-                controller: _groupNameController,
-                decoration: const InputDecoration(
-                  labelText: 'Nhập tên nhóm',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: () async {
-                String groupName = _groupNameController.text.trim();
+                const SizedBox(height: 32),
 
-                if (wordPath == null ||
-                    excelPath == null ||
-                    groupName.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Vui lòng chọn đủ 2 file và nhập tên nhóm!',
-                      ),
-                      backgroundColor: Colors.red,
+                // Nút chọn file Word
+                ElevatedButton.icon(
+                  onPressed: _isLoading ? null : _pickWordFile,
+                  icon: const Icon(Icons.description, size: 26, color: Colors.blue),
+                  label: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 14.0),
+                    child: Text('1. Chọn file SRS (Word .docx)', style: TextStyle(fontSize: 16)),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(50),
+                  ),
+                ),
+                if (wordPath != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Đã chọn: $wordPath',
+                    style: const TextStyle(fontSize: 12, color: Colors.green),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                const SizedBox(height: 16),
+
+                // Nút chọn file Excel
+                ElevatedButton.icon(
+                  onPressed: _isLoading ? null : _pickExcelFile,
+                  icon: const Icon(Icons.table_chart, size: 26, color: Colors.green),
+                  label: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 14.0),
+                    child: Text('2. Chọn file System Test (Excel .xlsx)', style: TextStyle(fontSize: 16)),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(50),
+                  ),
+                ),
+                if (excelPath != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Đã chọn: $excelPath',
+                    style: const TextStyle(fontSize: 12, color: Colors.green),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+                const SizedBox(height: 24),
+
+                // Ô nhập tên nhóm
+                TextField(
+                  controller: _groupNameController,
+                  enabled: !_isLoading,
+                  decoration: const InputDecoration(
+                    labelText: 'Nhập tên nhóm / Tên dự án',
+                    hintText: 'Ví dụ: WorkGang',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.group),
+                  ),
+                ),
+                const SizedBox(height: 28),
+
+                // KHU VỰC NÚT BẤM VÀ LOADING TIẾN TRÌNH
+                if (_isLoading) ...[
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.blue.shade200),
                     ),
-                  );
-                  return;
-                }
-
-                // 1. Thông báo đang đọc
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Đang đọc các sheet Excel & đối chiếu với Word... Vui lòng đợi!',
+                    child: Column(
+                      children: [
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 16),
+                        Text(
+                          _loadingMessage,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.blue.shade900,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Vui lòng không thao tác cho đến khi hoàn tất phân tích.',
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        ),
+                      ],
                     ),
                   ),
-                );
-
-                // 2. Đọc System Test Excel (nhiều sheet)
-                final reportData = await ExcelService().parseSystemTestExcel(
-                  excelPath!,
-                );
-                if (reportData == null || reportData.modules.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Không thể đọc dữ liệu test case từ file Excel này!',
-                      ),
-                      backgroundColor: Colors.red,
+                ] else ...[
+                  ElevatedButton(
+                    onPressed: _handleStartReview,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade800,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size.fromHeight(54),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
-                  );
-                  return;
-                }
-
-                // 3. Đọc file Word
-                final wordText = await WordService().extractText(wordPath!);
-
-                print("Đang gửi cho AI...");
-                AiReviewResult? aiResult = await AiService().reviewSystemTestWithSRS(
-                  srsContent: wordText.isNotEmpty ? wordText : 'Không có thông tin Word',
-                  excelSummary: reportData.toAiPromptSummary(),
-                );
-
-                if (aiResult == null) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Lỗi: AI không thể phân tích file này!'), backgroundColor: Colors.red),
-                    );
-                  }
-                  return;
-                }
-
-                // 4. Chuyển sang màn hình Report
-                if (context.mounted) {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => ReportScreen(
-                        groupName: groupName,
-                        reportData: reportData,
-                        aiResult: aiResult, // CHUYỀN TOÀN BỘ KẾT QUẢ AI SANG
-                      ),
-                    ),
-                  );
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 32,
-                  vertical: 16,
-                ),
-                textStyle: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              child: const Text('Phân Tích Coverage'),
+                    child: const Text('Bắt Đầu Thẩm Định (AI Review)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
